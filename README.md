@@ -21,6 +21,7 @@
   <a href="#features"><strong>Features</strong></a> · 
   <a href="#quick-start"><strong>Quick Start</strong></a> · 
   <a href="#deploy-to-vercel"><strong>Deploy</strong></a> · 
+  <a href="#-optional-cloud-persistence-with-supabase"><strong>Cloud Sync</strong></a> · 
   <a href="#api-routes"><strong>API</strong></a>
 </p>
 
@@ -43,7 +44,8 @@ Existing tools charge **$200–$500+/month**, lock you into closed ecosystems, a
 - 🔑 **BYOK** (Bring Your Own Keys): your data never leaves your machine
 - 🤖 **6 AI models** simultaneously: more coverage than paid tools
 - 💸 **$0/month**: self-hosted, open-source, forever free
-- 🛡️ **Local-first**: IndexedDB + localStorage, no external database
+- 🛡️ **Local-first** by default: IndexedDB + localStorage, no external database
+- ☁️ **Optional cloud sync** via your own Supabase project (free tier) for multi-device access
 
 ## Features
 
@@ -94,15 +96,20 @@ Next.js 16.1 + Turbopack
 │       ├── site-context/route.ts   # Homepage context extraction
 │       ├── unlocker/route.ts       # Bright Data Web Unlocker (single/batch)
 │       ├── brightdata-platforms/   # 6-platform AI citation polling
-│       └── bulk-sro/route.ts       # SSE bulk SRO analysis
+│       ├── bulk-sro/route.ts       # SSE bulk SRO analysis
+│       └── state/route.ts          # Cloud KV store (GET/PUT/DELETE — Node runtime)
 ├── components/
 │   ├── sovereign-dashboard.tsx     # Main shell — state, tabs, KPIs
 │   └── dashboard/
 │       ├── types.ts                # AppState, ScrapeRun, Provider, etc.
 │       └── tabs/                   # 13 tab components
 ├── lib/
-│   ├── client/sovereign-store.ts   # IndexedDB + localStorage persistence
+│   ├── client/
+│   │   ├── sovereign-store.ts      # Storage API — IDB default, cloud when configured
+│   │   └── cloud-mode.ts           # isCloudActive / isCloudAvailable helpers
 │   ├── server/
+│   │   ├── supabase.ts             # Server-side Supabase singleton (service_role)
+│   │   ├── kv-store.ts             # kvGet / kvSet / kvDelete helpers
 │   │   ├── brightdata-scraper.ts   # Bright Data AI Scraper integration
 │   │   ├── brightdata-platforms.ts # 6-platform citation scraper
 │   │   ├── gemini-grounding.ts     # Gemini Grounding via Google Search
@@ -110,14 +117,19 @@ Next.js 16.1 + Turbopack
 │   │   ├── serp.ts                 # SERP data via Bright Data
 │   │   ├── sro-types.ts            # SRO type definitions
 │   │   └── unlocker.ts             # Web Unlocker scraping
-│   └── demo-data.ts               # Deterministic seed data for demo mode
+│   └── demo-data.ts                # Deterministic seed data for demo mode
+├── supabase/
+│   └── migrations/
+│       └── 001_kv_store.sql        # kv_store table + updated_at trigger
 └── scripts/
     ├── test-scraper.js             # API validation script
     └── test-pillar.js              # Feature pillar tests
 ```
 
 **Key decisions:**
-- **IndexedDB** primary store (no size limit) with localStorage as best-effort cache
+- **IndexedDB** primary store (no size limit) with localStorage as best-effort cache; same public API whether cloud is active or not
+- **Cloud storage routes through `/api/state`** — the client never calls Supabase directly, so `service_role` stays server-side and RLS isn't a concern
+- **Auto-opt-in cloud**: when `NEXT_PUBLIC_CLOUD_STORAGE_ENABLED=true` the IDB write path becomes a cache; IDB is the authoritative fallback if the cloud route fails
 - **Edge runtime** for `/api/analyze` (Gemini Flash via OpenRouter) — fast global inference
 - **Bright Data Web Scraper API** for AI model scraping — reliable, structured data
 - **Bright Data SERP + Web Unlocker** for SRO pipeline data gathering
@@ -193,6 +205,41 @@ Want to deploy a read-only preview with sample data and no API keys?
 1. Add env var `NEXT_PUBLIC_DEMO_ONLY` = `true` in Vercel → Project Settings → Environment Variables
 2. Redeploy. The dashboard will load with pre-generated demo data instead of making live API calls
 
+### ☁️ Optional: Cloud persistence with Supabase
+
+By default, **all your data stays in your browser** (IndexedDB). That's great for a single device, but if you want your runs, prompts, and settings to persist across devices — or survive clearing browser data — you can plug in a free Supabase project.
+
+**Why it's optional**
+- Local-first still works 100% without Supabase.
+- When enabled, the client never talks to Supabase directly. Every read/write goes through a server-side Next.js route using your service-role key, so your key stays private and RLS is a non-issue.
+- You can toggle cloud sync on/off per-browser from **Project Settings → Cloud Sync**.
+
+**Setup (5 minutes)**
+
+1. Create a free project at [supabase.com](https://supabase.com/).
+2. In the Supabase SQL editor, paste and run `supabase/migrations/001_kv_store.sql` from this repo. This creates a single `kv_store` table with RLS enabled.
+3. In Supabase → **Project Settings → API**, grab:
+   - `Project URL` → `SUPABASE_URL`
+   - `service_role` secret key → `SUPABASE_SERVICE_ROLE_KEY`
+4. In Vercel → **Project Settings → Environment Variables**, add:
+
+   ```env
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+   NEXT_PUBLIC_CLOUD_STORAGE_ENABLED=true
+   ```
+
+5. Redeploy. The Project Settings tab will now show a Cloud Sync card.
+
+**Free tier caveats** (always check [supabase.com/pricing](https://supabase.com/pricing) for current limits)
+- Free tier includes a generous Postgres database, but projects pause after a week of inactivity on the free plan — first request after a pause may be slow.
+- The `service_role` key has full DB access — keep it server-side only (Vercel env vars are fine; never commit it).
+- Single-tenant by design: one deployment = one Supabase project = your data. If you want multi-user auth, you'll need to extend the schema with a user_id column + RLS policies.
+
+**What gets synced**
+- All app state keyed by workspace (`sovereign-aeo-tracker-*`) — runs, prompts, settings, SRO results.
+- NOT synced (kept local on purpose): theme preference, workspace list, active workspace — these are per-device UI choices.
+
 ## API Routes
 
 | Route | Runtime | Purpose |
@@ -206,6 +253,7 @@ Want to deploy a read-only preview with sample data and no API keys?
 | `POST /api/unlocker` | Node.js | Bright Data Web Unlocker — single or batch URL scraping |
 | `POST /api/brightdata-platforms` | Node.js | 6-platform AI citation polling via Bright Data datasets |
 | `POST /api/bulk-sro` | Node.js | SSE streaming — bulk SRO analysis across multiple keywords |
+| `GET/PUT/DELETE /api/state` | Node.js | Cloud KV store proxy — reads/writes to Supabase using service-role key (disabled when cloud not configured) |
 
 All routes include input validation and error handling. Most routes use in-memory caching to minimize API costs.
 
@@ -218,7 +266,7 @@ All routes include input validation and error handling. Most routes use in-memor
 | Styling | Tailwind CSS v4 with `@theme inline` |
 | Charts | Recharts |
 | Validation | Zod |
-| Storage | IndexedDB (idb-keyval) + localStorage |
+| Storage | IndexedDB (idb-keyval) + localStorage, optional Supabase cloud sync |
 | AI Scraping | Bright Data Web Scraper API |
 | LLM Inference | OpenRouter (Gemini Flash) |
 | SRO Grounding | Google Gemini API (`@google/genai`) |
