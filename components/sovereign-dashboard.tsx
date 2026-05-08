@@ -258,6 +258,9 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
   },
 };
 
+const EDIT_MODE_LOCKED = process.env.NEXT_PUBLIC_EDIT_MODE_LOCKED === "true";
+const EDIT_UNLOCK_SESSION_KEY = "sovereign-edit-unlocked";
+
 export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } = {}) {
   const [activeTab, setActiveTab] = useState<TabKey>("Prompt Hub");
   const [state, setState] = useState<AppState>(demoMode ? DEMO_STATE : defaultState);
@@ -269,6 +272,13 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   const [showWsPicker, setShowWsPicker] = useState(false);
   const [showScoreInfo, setShowScoreInfo] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Read-only / edit-mode lock
+  const [isReadOnly, setIsReadOnly] = useState(EDIT_MODE_LOCKED && !demoMode);
+  const [showUnlockModal, setShowUnlockModal] = useState(false);
+  const [unlockPassword, setUnlockPassword] = useState("");
+  const [unlockError, setUnlockError] = useState("");
+  const [unlockBusy, setUnlockBusy] = useState(false);
 
   /** Apply theme class to <html> */
   const applyTheme = useCallback((t: "light" | "dark" | "system") => {
@@ -302,6 +312,15 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     if (savedTheme) {
       setTheme(savedTheme);
       applyTheme(savedTheme);
+    }
+
+    // Restore prior unlock from the current browser session
+    if (EDIT_MODE_LOCKED && !demoMode) {
+      try {
+        if (sessionStorage.getItem(EDIT_UNLOCK_SESSION_KEY) === "1") {
+          setIsReadOnly(false);
+        }
+      } catch { /* ignore */ }
     }
 
     if (demoMode) return; // Skip workspace loading in demo mode
@@ -506,8 +525,43 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }));
   }
 
+  /** Returns true when the user is allowed to edit; shows the unlock modal otherwise. */
+  function ensureEditable(): boolean {
+    if (isReadOnly) {
+      setShowUnlockModal(true);
+      return false;
+    }
+    return true;
+  }
+
+  async function handleUnlock() {
+    setUnlockBusy(true);
+    setUnlockError("");
+    try {
+      const res = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: unlockPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setUnlockError((data as { error?: string }).error || "Incorrect password.");
+      } else {
+        setIsReadOnly(false);
+        setShowUnlockModal(false);
+        setUnlockPassword("");
+        try { sessionStorage.setItem(EDIT_UNLOCK_SESSION_KEY, "1"); } catch { /* ignore */ }
+      }
+    } catch {
+      setUnlockError("Network error. Please try again.");
+    } finally {
+      setUnlockBusy(false);
+    }
+  }
+
   function switchWorkspace(wsId: string) {
     if (demoMode) { setMessage("Demo mode — workspaces are read-only"); return; }
+    if (!ensureEditable()) return;
     // Save current state first
     saveSovereignValue(storageKeyForWorkspace(activeWsId), state);
     setActiveWsId(wsId);
@@ -518,6 +572,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   function createWorkspace(name: string) {
     if (demoMode) { setMessage("Demo mode — workspaces are read-only"); return; }
+    if (!ensureEditable()) return;
     const ws: Workspace = { id: generateId(), brandName: name, createdAt: new Date().toISOString() };
     const updated = [...workspaces, ws];
     setWorkspaces(updated);
@@ -533,6 +588,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   function deleteWorkspace(wsId: string) {
     if (demoMode) { setMessage("Demo mode — workspaces are read-only"); return; }
+    if (!ensureEditable()) return;
     if (workspaces.length <= 1) return;
     if (!window.confirm("Delete this workspace and all its data?")) return;
     const updated = workspaces.filter((w) => w.id !== wsId);
@@ -794,6 +850,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   /** Run a single scrape against one specific provider */
   async function callScrapeOne(prompt: string, provider: Provider): Promise<ScrapeRun | null> {
     if (demoMode) { setMessage("Demo mode — API calls are disabled"); return null; }
+    if (!ensureEditable()) return null;
     try {
       const response = await fetch("/api/scrape", {
         method: "POST",
@@ -873,6 +930,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   /** Batch run all custom prompts across all active providers — fully parallel */
   async function batchRunAllPrompts() {
+    if (!ensureEditable()) return;
     const prompts = state.customPrompts.map((p) =>
       p.text.replace(/\{brand\}/gi, state.brand.brandName || "our brand"),
     );
@@ -915,6 +973,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   function generatePersonaFanout() {
+    if (!ensureEditable()) return;
     const personas = state.personas
       .split("\n")
       .map((line) => line.trim())
@@ -928,6 +987,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   function addCustomPrompt(value: string) {
+    if (!ensureEditable()) return;
     const cleaned = value.trim();
     if (!cleaned) return;
     setState((prev) => {
@@ -938,6 +998,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   function removeCustomPrompt(value: string, deleteResponses?: boolean) {
+    if (!ensureEditable()) return;
     setState((prev) => ({
       ...prev,
       customPrompts: prev.customPrompts.filter((entry) => entry.text !== value),
@@ -948,6 +1009,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   function updatePromptTags(text: string, tags: string[]) {
+    if (!ensureEditable()) return;
     setState((prev) => ({
       ...prev,
       customPrompts: prev.customPrompts.map((p) =>
@@ -957,6 +1019,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   function deleteRun(index: number) {
+    if (!ensureEditable()) return;
     setState((prev) => ({
       ...prev,
       runs: prev.runs.filter((_, i) => i !== index),
@@ -1017,6 +1080,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   async function runNicheExplorer() {
     if (demoMode) { setMessage("Demo mode — API calls are disabled"); return; }
+    if (!ensureEditable()) return;
     setBusy(true);
     setMessage("Generating niche queries...");
 
@@ -1056,6 +1120,7 @@ Requirements:
 
   async function runBattlecards() {
     if (demoMode) { setMessage("Demo mode — API calls are disabled"); return; }
+    if (!ensureEditable()) return;
     setBusy(true);
     setMessage("Building competitor battlecards...");
 
@@ -1227,6 +1292,7 @@ Now analyze all ${competitorList.length} competitors:`,
 
   async function handleResetData() {
     if (demoMode) { setMessage("Demo mode — data cannot be modified"); return; }
+    if (!ensureEditable()) return;
     if (!window.confirm("This will delete ALL saved data (runs, prompts, settings). Continue?")) return;
     await clearSovereignStore(storageKeyForWorkspace(activeWsId));
     setState(defaultState);
@@ -1238,9 +1304,9 @@ Now analyze all ${competitorList.length} competitors:`,
       return (
         <ProjectSettingsTab
           brand={state.brand}
-          onBrandChange={(patch) =>
-            setState((prev) => ({ ...prev, brand: { ...prev.brand, ...patch } }))
-          }
+          onBrandChange={(patch) => {
+            if (ensureEditable()) setState((prev) => ({ ...prev, brand: { ...prev.brand, ...patch } }));
+          }}
           onReset={handleResetData}
         />
       );
@@ -1269,8 +1335,8 @@ Now analyze all ${competitorList.length} competitors:`,
           personas={state.personas}
           fanoutPrompts={state.fanoutPrompts}
           busy={busy}
-          onPromptChange={(value) => setState((prev) => ({ ...prev, prompt: value }))}
-          onPersonasChange={(value) => setState((prev) => ({ ...prev, personas: value }))}
+          onPromptChange={(value) => { if (ensureEditable()) setState((prev) => ({ ...prev, prompt: value })); }}
+          onPersonasChange={(value) => { if (ensureEditable()) setState((prev) => ({ ...prev, personas: value })); }}
           onGenerateFanout={generatePersonaFanout}
           onRunPrompt={callScrape}
         />
@@ -1283,7 +1349,7 @@ Now analyze all ${competitorList.length} competitors:`,
           niche={state.niche}
           nicheQueries={state.nicheQueries}
           trackedPrompts={state.customPrompts.map((p) => p.text)}
-          onNicheChange={(value) => setState((prev) => ({ ...prev, niche: value }))}
+          onNicheChange={(value) => { if (ensureEditable()) setState((prev) => ({ ...prev, niche: value })); }}
           onGenerateQueries={runNicheExplorer}
           onAddToTracking={addCustomPrompt}
         />
@@ -1298,13 +1364,13 @@ Now analyze all ${competitorList.length} competitors:`,
           lastScheduledRun={state.lastScheduledRun}
           driftAlerts={state.driftAlerts}
           busy={busy}
-          onToggleSchedule={(enabled) =>
-            setState((prev) => ({ ...prev, scheduleEnabled: enabled }))
-          }
-          onIntervalChange={(interval) =>
-            setState((prev) => ({ ...prev, scheduleIntervalMs: interval }))
-          }
-          onRunNow={runScheduledBatch}
+          onToggleSchedule={(enabled) => {
+            if (ensureEditable()) setState((prev) => ({ ...prev, scheduleEnabled: enabled }));
+          }}
+          onIntervalChange={(interval) => {
+            if (ensureEditable()) setState((prev) => ({ ...prev, scheduleIntervalMs: interval }));
+          }}
+          onRunNow={() => { if (ensureEditable()) runScheduledBatch(); }}
           onDismissAlert={dismissAlert}
           onDismissAllAlerts={dismissAllAlerts}
         />
@@ -1316,7 +1382,7 @@ Now analyze all ${competitorList.length} competitors:`,
         <BattlecardsTab
           competitors={state.competitors}
           battlecards={state.battlecards}
-          onCompetitorsChange={(competitors) => setState((prev) => ({ ...prev, competitors }))}
+          onCompetitorsChange={(competitors) => { if (ensureEditable()) setState((prev) => ({ ...prev, competitors })); }}
           onBuildBattlecards={runBattlecards}
         />
       );
@@ -1567,15 +1633,16 @@ Now analyze all ${competitorList.length} competitors:`,
               return (
                 <button
                   key={p}
-                  onClick={() =>
+                  onClick={() => {
+                    if (!ensureEditable()) return;
                     setState((prev) => {
                       const next = active
                         ? prev.activeProviders.filter((x) => x !== p)
                         : [...prev.activeProviders, p];
                       if (next.length === 0) return prev;
                       return { ...prev, activeProviders: next, provider: next[0] };
-                    })
-                  }
+                    });
+                  }}
                   className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
                     active
                       ? "bg-th-accent text-th-text-inverse"
@@ -1588,12 +1655,13 @@ Now analyze all ${competitorList.length} competitors:`,
               );
             })}
             <button
-              onClick={() =>
+              onClick={() => {
+                if (!ensureEditable()) return;
                 setState((prev) => ({
                   ...prev,
                   activeProviders: prev.activeProviders.length === ALL_PROVIDERS.length ? [prev.provider] : [...ALL_PROVIDERS],
-                }))
-              }
+                }));
+              }}
               className="ml-1 rounded-md border border-th-border px-2 py-1 text-xs text-th-text-muted hover:bg-th-card-hover hover:text-th-text-secondary"
               title={state.activeProviders.length === ALL_PROVIDERS.length ? "Select only one" : "Select all models"}
             >
@@ -1609,6 +1677,28 @@ Now analyze all ${competitorList.length} competitors:`,
           >
             {themeIcon}
           </button>
+
+          {/* Edit-mode lock — only shown when EDIT_MODE_LOCKED is configured */}
+          {!demoMode && EDIT_MODE_LOCKED && (
+            <button
+              onClick={() => {
+                if (isReadOnly) {
+                  setShowUnlockModal(true);
+                } else {
+                  setIsReadOnly(true);
+                  try { sessionStorage.removeItem(EDIT_UNLOCK_SESSION_KEY); } catch { /* ignore */ }
+                }
+              }}
+              className={`rounded-md border px-2 py-1 text-sm transition-colors ${
+                isReadOnly
+                  ? "border-th-danger/40 bg-th-danger-soft text-th-danger hover:bg-th-danger/20"
+                  : "border-th-success/40 bg-th-success-soft text-th-success hover:bg-th-success/20"
+              }`}
+              title={isReadOnly ? "Locked — click to enter edit mode" : "Editing — click to lock"}
+            >
+              {isReadOnly ? "🔒" : "🔓"}
+            </button>
+          )}
 
           <span className={`rounded-md px-2.5 py-1 text-xs ${busy ? "animate-pulse bg-th-accent-soft text-th-text-accent" : "bg-th-card-alt text-th-text-muted"}`}>
             {message || "Ready"}
@@ -1721,6 +1811,51 @@ Now analyze all ${competitorList.length} competitors:`,
           </section>
         </main>
       </div>
+
+      {/* ── Unlock modal ─────────────────────────────────────────── */}
+      {showUnlockModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={(e) => { if (e.target === e.currentTarget) { setShowUnlockModal(false); setUnlockPassword(""); setUnlockError(""); } }}
+        >
+          <div className="w-full max-w-sm rounded-xl border border-th-border bg-th-card p-6 shadow-2xl">
+            <h2 className="mb-1 text-base font-semibold text-th-text">Enter edit password</h2>
+            <p className="mb-4 text-sm text-th-text-muted">Enter the password to enable editing and scraping.</p>
+            <form
+              onSubmit={(e) => { e.preventDefault(); handleUnlock(); }}
+              className="space-y-3"
+            >
+              <input
+                type="password"
+                value={unlockPassword}
+                onChange={(e) => { setUnlockPassword(e.target.value); setUnlockError(""); }}
+                placeholder="Password"
+                autoFocus
+                className="w-full rounded-lg border border-th-border bg-th-bg px-3 py-2 text-sm text-th-text placeholder-th-text-muted outline-none focus:border-th-accent focus:ring-1 focus:ring-th-accent"
+              />
+              {unlockError && (
+                <p className="text-xs text-th-danger">{unlockError}</p>
+              )}
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  disabled={unlockBusy || !unlockPassword}
+                  className="flex-1 rounded-lg bg-th-accent px-4 py-2 text-sm font-medium text-th-text-inverse transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {unlockBusy ? "Verifying…" : "Unlock"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setShowUnlockModal(false); setUnlockPassword(""); setUnlockError(""); }}
+                  className="rounded-lg border border-th-border px-4 py-2 text-sm text-th-text-muted hover:bg-th-card-hover transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
