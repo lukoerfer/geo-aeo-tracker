@@ -107,32 +107,35 @@ export async function POST(req: NextRequest) {
   const newRuns: ScrapeRun[] = [];
   const errors: string[] = [];
 
-  for (const prompt of prompts) {
-    for (const provider of providers) {
-      try {
-        const scraped = await runAiScraper({ provider, prompt, requireSources: true });
-        const run: ScrapeRun = {
-          provider: scraped.provider,
-          prompt: scraped.prompt,
-          answer: scraped.answer,
-          sources: scraped.sources,
-          createdAt: scraped.createdAt,
-          visibilityScore: calcVisibilityScore(
-            scraped.answer,
-            scraped.sources,
-            brandTerms,
-            state.brand.websites ?? [],
-          ),
-          sentiment: detectSentiment(scraped.answer, brandTerms),
-          brandMentions: findMentions(scraped.answer, brandTerms),
-          competitorMentions: findMentions(scraped.answer, competitorTerms),
-        };
-        newRuns.push(run);
-      } catch (err) {
-        errors.push(
-          `${provider} / ${prompt.slice(0, 60)}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
+  // Build all prompt × provider jobs and run them in parallel
+  const jobs = prompts.flatMap((prompt) =>
+    providers.map((provider) => async () => {
+      const scraped = await runAiScraper({ provider, prompt, requireSources: true });
+      return {
+        provider: scraped.provider,
+        prompt: scraped.prompt,
+        answer: scraped.answer,
+        sources: scraped.sources,
+        createdAt: scraped.createdAt,
+        visibilityScore: calcVisibilityScore(
+          scraped.answer,
+          scraped.sources,
+          brandTerms,
+          state.brand.websites ?? [],
+        ),
+        sentiment: detectSentiment(scraped.answer, brandTerms),
+        brandMentions: findMentions(scraped.answer, brandTerms),
+        competitorMentions: findMentions(scraped.answer, competitorTerms),
+      } satisfies ScrapeRun;
+    }),
+  );
+
+  const results = await Promise.allSettled(jobs.map((job) => job()));
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      newRuns.push(result.value);
+    } else {
+      errors.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
     }
   }
 

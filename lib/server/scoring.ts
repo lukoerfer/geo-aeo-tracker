@@ -73,10 +73,10 @@ export function calcVisibilityScore(
   const first200 = lower.slice(0, 200);
   if (brandTerms.some((t) => first200.includes(t.toLowerCase()))) score += 20;
 
-  const mentionCount = brandTerms.reduce((acc, t) => {
-    const re = new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-    return acc + (lower.match(re)?.length ?? 0);
-  }, 0);
+  const brandRegexes = brandTerms.map(
+    (t) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"),
+  );
+  const mentionCount = brandRegexes.reduce((acc, re) => acc + (lower.match(re)?.length ?? 0), 0);
   if (mentionCount >= 3) score += 15;
   else if (mentionCount >= 2) score += 8;
 

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "crypto";
 import { z } from "zod";
 
 const bodySchema = z.object({ password: z.string() });
@@ -32,7 +33,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing password field." }, { status: 400 });
   }
 
-  if (parsed.data.password !== editPassword) {
+  // Use constant-time comparison to prevent timing attacks
+  const expected = Buffer.from(editPassword, "utf8");
+  const provided = Buffer.from(parsed.data.password, "utf8");
+  const match =
+    expected.length === provided.length && timingSafeEqual(expected, provided);
+
+  if (!match) {
     return NextResponse.json({ error: "Incorrect password." }, { status: 401 });
   }
 
